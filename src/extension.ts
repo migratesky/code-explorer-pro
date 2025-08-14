@@ -120,6 +120,14 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     if (element instanceof ReferenceLineNode) {
       return element.symbolChildren;
     }
+    if (element instanceof InlineSymbolNode) {
+      // Support expanding inline symbols via chevron (without invoking the command)
+      this.logger.appendLine(`[EXPAND] Inline symbol via chevron: ${element.symbol}`);
+      console.log(`${timestamp()} [info] Expand inline via chevron: ${element.symbol}`);
+      const temp = new SymbolNode(element.symbol, element.parentRef, this.logger);
+      await this.expandSymbol(temp);
+      return temp.children ?? [];
+    }
     return [];
   }
 

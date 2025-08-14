@@ -6,6 +6,8 @@
   "engines": {
     "vscode": "^1.89.0"
   },
+  "publisher": "migratesky",
+  "repository": "https://github.com/migratesky/vscode-code-explorer-pro",
   "categories": [
     "Other"
   ],

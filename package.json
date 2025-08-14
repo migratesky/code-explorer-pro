@@ -1,0 +1,62 @@
+{
+  "name": "code-explorer-pro",
+  "displayName": "Code Explorer Pro",
+  "description": "Recursive reference search for VS Code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.89.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:code-explorer-pro.findRecursiveReferences"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "code-explorer-pro.findRecursiveReferences",
+        "title": "Find Recursive References"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "code-explorer-pro.findRecursiveReferences",
+        "key": "ctrl+shift+space",
+        "mac": "ctrl+shift+space",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "codeExplorerProReferences",
+          "name": "References"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts || true",
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "npm run compile && mocha out/unit/**/*.test.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.89.0",
+    "@types/node": "^20.0.0",
+    "@types/mocha": "^10.0.0",
+    "@types/glob": "^8.1.0",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^7.3.1",
+    "@typescript-eslint/parser": "^7.3.1",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "@vscode/test-electron": "^2.4.0",
+    "typescript": "^5.3.3"
+  }
+}

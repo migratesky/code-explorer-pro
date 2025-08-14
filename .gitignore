@@ -1,0 +1,35 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+
+# Build outputs
+out/
+dist/
+coverage/
+
+# VS Code test downloads
+.vscode-test/
+
+# VS Code workspace settings (keep launch/tasks in repo if needed)
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# OS / Editor
+.DS_Store
+.idea/
+*.swp
+
+# Env / Secrets
+.env
+.env.*
+
+# Extension packages
+*.vsix
+
+# Misc
+*.log

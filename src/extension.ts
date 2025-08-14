@@ -42,11 +42,20 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   private roots: FileGroupNode[] = [];
   private cache = new Map<string, ReferenceLineNode[]>();
   private view?: vscode.TreeView<TreeNode>;
+  private selectionHandler?: vscode.Disposable;
 
   constructor(private logger: vscode.OutputChannel) {}
 
   attachView(view: vscode.TreeView<TreeNode>) {
     this.view = view;
+    // Open editor when a line item is selected (label click). Chevron still handles expand/collapse.
+    this.selectionHandler?.dispose();
+    this.selectionHandler = view.onDidChangeSelection(async (e) => {
+      const node = e.selection?.[0];
+      if (node instanceof ReferenceLineNode) {
+        await openLocation(node.location, this.logger);
+      }
+    });
   }
 
   async findRecursiveReferences() {
@@ -219,7 +228,7 @@ class ReferenceLineNode extends vscode.TreeItem {
     public readonly matchedSymbol: string
   ) {
     super(`${vscode.workspace.asRelativePath(location.uri)}:${location.range.start.line + 1}  ${preview.trim()}`,
-      vscode.TreeItemCollapsibleState.None);
+      vscode.TreeItemCollapsibleState.Collapsed);
     this.contextValue = 'referenceLine';
     this.iconPath = new vscode.ThemeIcon('link');
     this.tooltip = this.label?.toString();

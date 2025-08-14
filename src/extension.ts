@@ -9,9 +9,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     logger,
-    vscode.commands.registerCommand('code-explorer-pro.findRecursiveReferences', () => {
+    vscode.commands.registerCommand('code-explorer-pro.findRecursiveReferences', async () => {
       console.log(`${timestamp()} [info] Command invoked: code-explorer-pro.findRecursiveReferences`);
-      provider.findRecursiveReferences();
+      await provider.findRecursiveReferences();
     }),
     vscode.commands.registerCommand('code-explorer-pro.openLocation', (location: vscode.Location) => {
       console.log(`${timestamp()} [info] Command invoked: code-explorer-pro.openLocation -> ${location.uri.fsPath}:${location.range.start.line + 1}`);
@@ -42,29 +42,51 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
 
   constructor(private logger: vscode.OutputChannel) {}
 
-  findRecursiveReferences() {
+  async findRecursiveReferences() {
     const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      this.logger.appendLine('[WARN] No active editor');
-      console.log(`${timestamp()} [warn] No active editor`);
-      return;
+    let defaultText = '';
+    if (editor) {
+      const sel = editor.selection;
+      if (sel && !sel.isEmpty) {
+        defaultText = editor.document.getText(sel).trim();
+      } else {
+        const position = sel?.active ?? editor.selection.active;
+        const wordRange = editor.document.getWordRangeAtPosition(position);
+        if (wordRange) defaultText = editor.document.getText(wordRange);
+      }
     }
 
-    const position = editor.selection.active;
-    const wordRange = editor.document.getWordRangeAtPosition(position);
-    if (!wordRange) {
-      vscode.window.showInformationMessage('No symbol at cursor');
-      this.logger.appendLine('[INFO] No word range at cursor');
-      console.log(`${timestamp()} [info] No symbol found at cursor`);
-      return;
+    let symbol = defaultText.trim();
+    if (!symbol) {
+      const query = await vscode.window.showInputBox({
+        prompt: 'Search project (free text)',
+        placeHolder: 'Enter text to search',
+        value: defaultText,
+        ignoreFocusOut: true
+      });
+
+      symbol = (query ?? '').trim();
+      if (!symbol) {
+        vscode.window.showInformationMessage('No search text provided');
+        this.logger.appendLine('[INFO] No search text provided');
+        console.log(`${timestamp()} [info] No search text provided`);
+        return;
+      }
     }
 
-    const symbol = editor.document.getText(wordRange);
-    this.logger.appendLine(`[START] Root search for symbol: ${symbol}`);
+    this.logger.appendLine(`[START] Root search for text: ${symbol}`);
     console.log(`${timestamp()} [info] Root search for symbol: ${symbol}`);
     const root = new SymbolNode(symbol, undefined, this.logger);
     this.roots = [root];
     this._onDidChangeTreeData.fire(undefined);
+    // Automatically expand the root so results are visible immediately
+    await this.expandSymbol(root);
+    // Bring the view into focus so users see results immediately
+    try {
+      await vscode.commands.executeCommand('codeExplorerProReferences.focus');
+    } catch {
+      // ignore if command not available in this VS Code version
+    }
   }
 
   async expandSymbol(node: SymbolNode) {

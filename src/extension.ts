@@ -39,7 +39,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private roots: ReferenceLineNode[] = [];
+  private roots: FileGroupNode[] = [];
   private cache = new Map<string, ReferenceLineNode[]>();
   private view?: vscode.TreeView<TreeNode>;
 
@@ -87,9 +87,29 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     if (this.view) {
       this.view.title = `References for "${symbol}"`;
     }
-    // Perform search and display results directly at top level
+    // Perform search, then group results by file at the root level
     const lines = await findReferencesByText(symbol, this.logger);
-    this.roots = lines;
+    const byFile = new Map<string, ReferenceLineNode[]>();
+    for (const node of lines) {
+      const key = node.location.uri.fsPath;
+      const arr = byFile.get(key) ?? [];
+      arr.push(node);
+      byFile.set(key, arr);
+    }
+    const groups: FileGroupNode[] = [];
+    for (const [fsPath, children] of byFile) {
+      const label = vscode.workspace.asRelativePath(fsPath);
+      // Update child labels to avoid repeating file path inside the group
+      for (const ch of children) {
+        const ln = ch.location.range.start.line + 1;
+        ch.label = `${ln}  ${ch.preview.trim()}`;
+        ch.tooltip = `${vscode.workspace.asRelativePath(ch.location.uri)}:${ln}  ${ch.preview.trim()}`;
+      }
+      groups.push(new FileGroupNode(label, children));
+    }
+    // Sort groups by label for stable order
+    groups.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    this.roots = groups;
     this._onDidChangeTreeData.fire(undefined);
     // Bring the view into focus so users see results immediately
     try {
@@ -121,6 +141,9 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     if (!element) {
       return this.roots;
     }
+    if (element instanceof FileGroupNode) {
+      return element.children;
+    }
     if (element instanceof SymbolNode) {
       this.logger.appendLine(`[CHEVRON] Symbol expand requested: ${element.symbol}`);
       console.log(`${timestamp()} [info] Chevron expand: symbol -> ${element.symbol}`);
@@ -146,7 +169,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     return [];
   }
 
-  getRoots(): ReferenceLineNode[] {
+  getRoots(): FileGroupNode[] {
     return this.roots;
   }
 
@@ -161,7 +184,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 }
 
-type TreeNode = SymbolNode | ReferenceLineNode | InlineSymbolNode;
+type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode;
 
 class SymbolNode extends vscode.TreeItem {
   public children?: ReferenceLineNode[];
@@ -179,6 +202,15 @@ class SymbolNode extends vscode.TreeItem {
   }
 }
 
+class FileGroupNode extends vscode.TreeItem {
+  constructor(public readonly label: string, public readonly children: ReferenceLineNode[]) {
+    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.contextValue = 'fileGroup';
+    this.iconPath = new vscode.ThemeIcon('file');
+    this.tooltip = label;
+  }
+}
+
 class ReferenceLineNode extends vscode.TreeItem {
   public symbolChildren: InlineSymbolNode[] = [];
   constructor(
@@ -187,7 +219,7 @@ class ReferenceLineNode extends vscode.TreeItem {
     public readonly matchedSymbol: string
   ) {
     super(`${vscode.workspace.asRelativePath(location.uri)}:${location.range.start.line + 1}  ${preview.trim()}`,
-      vscode.TreeItemCollapsibleState.Collapsed);
+      vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'referenceLine';
     this.iconPath = new vscode.ThemeIcon('link');
     this.tooltip = this.label?.toString();

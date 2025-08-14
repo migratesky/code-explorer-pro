@@ -230,66 +230,113 @@ async function findReferencesByText(symbol: string, logger: vscode.OutputChannel
   const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
   const includeGlob = cfg.get<string>('includeGlob', '**/*');
   const exclude = cfg.get<string>('excludeGlob', '**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**');
+  const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
+  const verbose = cfg.get<boolean>('verboseLogging', false);
+  const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
   const maxFiles = cfg.get<number>('maxFiles', 1000);
   const maxLinesPerFile = cfg.get<number>('maxLinesPerFile', 10000);
   const progressEvery = cfg.get<number>('progressEvery', 50);
-  const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
-  const verbose = cfg.get<boolean>('verboseLogging', false);
-  logger.appendLine(`[SEARCH] Manual scan for text="${symbol}" include="${includeGlob}" exclude="${exclude}" maxFiles=${maxFiles}`);
-  console.log(`${timestamp()} [info] [SEARCH] start text="${symbol}"`);
+
+  logger.appendLine(`[SEARCH] Fast manual scan for text="${symbol}" include="${includeGlob}" exclude="${exclude}"`);
+  console.log(`${timestamp()} [info] [SEARCH] fast-manual text="${symbol}"`);
   const t0 = Date.now();
 
+  // Precompile matcher
+  const wordRegex = matchMode === 'word' ? new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(symbol)}(?![A-Za-z0-9_])`, 'g') : undefined;
+
+  // Collect files
   let files: vscode.Uri[] = [];
   try {
     files = await vscode.workspace.findFiles(includeGlob, exclude, maxFiles);
   } catch (e) {
     logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
-    console.log(`${timestamp()} [error] findFiles failed: ${String(e)}`);
     return results;
   }
-  logger.appendLine(`[SEARCH] Files to scan: ${files.length}`);
-  for (let i = 0; i < files.length; i++) {
-    const uri = files[i];
-    if (i % progressEvery === 0) {
-      const elapsed = Date.now() - t0;
-      logger.appendLine(`[PROGRESS] file ${i}/${files.length}, results=${results.length}, elapsedMs=${elapsed}`);
-      console.log(`${timestamp()} [info] [PROGRESS] ${i}/${files.length} results=${results.length} elapsedMs=${elapsed}`);
-    }
-    if (Date.now() - t0 > maxSearchMs) {
-      logger.appendLine(`[ABORT] Search timeout after ${Date.now() - t0}ms, returning partial results (${results.length})`);
-      console.log(`${timestamp()} [warn] [ABORT] search timeout, partial results=${results.length}`);
-      break;
-    }
-    try {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      const limit = Math.min(doc.lineCount, maxLinesPerFile);
-      let fileHits = 0;
-      for (let lineNum = 0; lineNum < limit; lineNum++) {
-        const text = doc.lineAt(lineNum).text;
-        const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
-        const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
-        const matches = matchMode === 'word' ? findAllWordHits(text, symbol) : findAllTextHits(text, symbol);
-        for (const startCol of matches) {
-          const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
-          const preview = createPreview(text, range.start.character, symbol.length);
-          const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
-          node.symbolChildren = extractSymbolsFromLine(text, symbol).map(s => new InlineSymbolNode(s, node));
-          results.push(node);
-          fileHits++;
+
+  const cts = new vscode.CancellationTokenSource();
+  const timeout = setTimeout(() => {
+    logger.appendLine(`[ABORT] Search timeout after ${Date.now() - t0}ms, returning partial results (${results.length})`);
+    cts.cancel();
+  }, maxSearchMs);
+
+  // Concurrency-limited processing
+  const concurrency = 8;
+  let idx = 0;
+  let processed = 0;
+  async function worker() {
+    while (!cts.token.isCancellationRequested) {
+      const myIdx = idx++;
+      if (myIdx >= files.length) break;
+      const uri = files[myIdx];
+      try {
+        const buf = await vscode.workspace.fs.readFile(uri);
+        const text = Buffer.from(buf).toString('utf8');
+        const lines = text.split(/\r?\n/);
+        const limit = Math.min(lines.length, maxLinesPerFile);
+        let fileHits = 0;
+        for (let lineNum = 0; lineNum < limit; lineNum++) {
+          const line = lines[lineNum];
+          if (!line) continue;
+          if (matchMode === 'word') {
+            wordRegex!.lastIndex = 0;
+            let m: RegExpExecArray | null;
+            while ((m = wordRegex!.exec(line)) !== null) {
+              const startCol = m.index;
+              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
+              const preview = createPreview(line, startCol, symbol.length);
+              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
+              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
+              results.push(node);
+              fileHits++;
+            }
+          } else {
+            let from = 0;
+            while (true) {
+              const idxFound = line.indexOf(symbol, from);
+              if (idxFound === -1) break;
+              const startCol = idxFound;
+              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
+              const preview = createPreview(line, startCol, symbol.length);
+              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
+              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
+              results.push(node);
+              fileHits++;
+              from = idxFound + symbol.length;
+            }
+          }
         }
+        if (fileHits > 0 || verbose) {
+          logger.appendLine(`[FILE] ${vscode.workspace.asRelativePath(uri)} hits=${fileHits} scannedLines=${Math.min(lines.length, maxLinesPerFile)}`);
+        }
+      } catch (e) {
+        logger.appendLine(`[WARN] Failed to scan ${uri.fsPath}: ${String(e)}`);
       }
-      if (fileHits > 0 || verbose) {
-        logger.appendLine(`[FILE] ${vscode.workspace.asRelativePath(uri)} hits=${fileHits} scannedLines=${Math.min(doc.lineCount, maxLinesPerFile)}`);
+      processed++;
+      if (processed % progressEvery === 0) {
+        const elapsed = Date.now() - t0;
+        console.log(`${timestamp()} [info] [PROGRESS] ${processed}/${files.length} results=${results.length} elapsedMs=${elapsed}`);
       }
-    } catch (e) {
-      logger.appendLine(`[WARN] Failed to scan ${uri.fsPath}: ${String(e)}`);
+      if (Date.now() - t0 > maxSearchMs) {
+        logger.appendLine(`[ABORT] Search timeout during processing after ${Date.now() - t0}ms, returning partial results (${results.length})`);
+        break;
+      }
     }
   }
 
+  const workers = Array.from({ length: Math.min(concurrency, files.length) }, () => worker());
+  await Promise.all(workers);
+
+  clearTimeout(timeout);
   const totalMs = Date.now() - t0;
-  logger.appendLine(`[RESULT] ${results.length} references for ${symbol} in ${totalMs}ms`);
-  console.log(`${timestamp()} [info] [RESULT] ${results.length} refs in ${totalMs}ms`);
+  if (verbose) {
+    logger.appendLine(`[RESULT] ${results.length} references for ${symbol} in ${totalMs}ms (fast-manual)`);
+  }
+  console.log(`${timestamp()} [info] [RESULT] ${results.length} refs in ${totalMs}ms (fast-manual)`);
   return results;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // helpers now imported from ./core/analysis

@@ -5,10 +5,12 @@ export function activate(context: vscode.ExtensionContext) {
   console.log(`${timestamp()} [info] Activating extension code-explorer-pro`);
   const logger = vscode.window.createOutputChannel('Code Explorer Pro');
   const provider = new ReferencesProvider(logger);
-  vscode.window.registerTreeDataProvider('codeExplorerProReferences', provider);
+  const treeView = vscode.window.createTreeView('codeExplorerProReferences', { treeDataProvider: provider });
+  provider.attachView(treeView);
 
   context.subscriptions.push(
     logger,
+    treeView,
     vscode.commands.registerCommand('code-explorer-pro.findRecursiveReferences', async () => {
       console.log(`${timestamp()} [info] Command invoked: code-explorer-pro.findRecursiveReferences`);
       await provider.findRecursiveReferences();
@@ -37,10 +39,15 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private roots: SymbolNode[] = [];
+  private roots: ReferenceLineNode[] = [];
   private cache = new Map<string, ReferenceLineNode[]>();
+  private view?: vscode.TreeView<TreeNode>;
 
   constructor(private logger: vscode.OutputChannel) {}
+
+  attachView(view: vscode.TreeView<TreeNode>) {
+    this.view = view;
+  }
 
   async findRecursiveReferences() {
     const editor = vscode.window.activeTextEditor;
@@ -74,13 +81,16 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       }
     }
 
-    this.logger.appendLine(`[START] Root search for text: ${symbol}`);
+    this.logger.appendLine(`[START] Search for text: ${symbol}`);
     console.log(`${timestamp()} [info] Root search for symbol: ${symbol}`);
-    const root = new SymbolNode(symbol, undefined, this.logger);
-    this.roots = [root];
+    // Update view title with the query
+    if (this.view) {
+      this.view.title = `References for "${symbol}"`;
+    }
+    // Perform search and display results directly at top level
+    const lines = await findReferencesByText(symbol, this.logger);
+    this.roots = lines;
     this._onDidChangeTreeData.fire(undefined);
-    // Automatically expand the root so results are visible immediately
-    await this.expandSymbol(root);
     // Bring the view into focus so users see results immediately
     try {
       await vscode.commands.executeCommand('codeExplorerProReferences.focus');
@@ -136,7 +146,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     return [];
   }
 
-  getRoots(): SymbolNode[] {
+  getRoots(): ReferenceLineNode[] {
     return this.roots;
   }
 

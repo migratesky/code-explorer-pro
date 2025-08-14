@@ -34,6 +34,20 @@ export function findAllWordHits(line: string, word: string): number[] {
   return cols;
 }
 
+// Find all occurrences of query as a raw substring (no word boundaries), case-sensitive.
+export function findAllTextHits(line: string, query: string): number[] {
+  if (!query) return [];
+  const hits: number[] = [];
+  let from = 0;
+  while (from <= line.length - query.length) {
+    const idx = line.indexOf(query, from);
+    if (idx === -1) break;
+    hits.push(idx);
+    from = idx + 1; // allow overlapping occurrences
+  }
+  return hits;
+}
+
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

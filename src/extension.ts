@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { createPreview, extractSymbolsFromLine, findAllWordHits } from './core/analysis';
+import { createPreview, extractSymbolsFromLine, findAllWordHits, findAllTextHits } from './core/analysis';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log(`${timestamp()} [info] Activating extension code-explorer-pro`);
@@ -112,12 +112,17 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       return this.roots;
     }
     if (element instanceof SymbolNode) {
+      this.logger.appendLine(`[CHEVRON] Symbol expand requested: ${element.symbol}`);
+      console.log(`${timestamp()} [info] Chevron expand: symbol -> ${element.symbol}`);
       if (!element.children) {
         await this.expandSymbol(element);
       }
+      this.logger.appendLine(`[CHILDREN] Symbol ${element.symbol} -> ${(element.children ?? []).length} items`);
       return element.children ?? [];
     }
     if (element instanceof ReferenceLineNode) {
+      this.logger.appendLine(`[CHEVRON] Reference expand requested: ${element.label}`);
+      console.log(`${timestamp()} [info] Chevron expand: reference -> ${element.label}`);
       return element.symbolChildren;
     }
     if (element instanceof InlineSymbolNode) {
@@ -212,31 +217,68 @@ async function openLocation(location: vscode.Location, logger: vscode.OutputChan
 
 async function findReferencesByText(symbol: string, logger: vscode.OutputChannel): Promise<ReferenceLineNode[]> {
   const results: ReferenceLineNode[] = [];
-  const includeGlob = '{**/*.ts,**/*.tsx,**/*.js,**/*.jsx,**/*.mjs,**/*.cjs}';
-  const exclude = '**/{node_modules,dist,out,build,.git}/**';
-  logger.appendLine(`[SEARCH] Manual scan for symbol="${symbol}" include="${includeGlob}"`);
+  const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
+  const includeGlob = cfg.get<string>('includeGlob', '**/*');
+  const exclude = cfg.get<string>('excludeGlob', '**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**');
+  const maxFiles = cfg.get<number>('maxFiles', 1000);
+  const maxLinesPerFile = cfg.get<number>('maxLinesPerFile', 10000);
+  const progressEvery = cfg.get<number>('progressEvery', 50);
+  const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
+  const verbose = cfg.get<boolean>('verboseLogging', false);
+  logger.appendLine(`[SEARCH] Manual scan for text="${symbol}" include="${includeGlob}" exclude="${exclude}" maxFiles=${maxFiles}`);
+  console.log(`${timestamp()} [info] [SEARCH] start text="${symbol}"`);
+  const t0 = Date.now();
 
-  const files = await vscode.workspace.findFiles(includeGlob, exclude, 500);
-  for (const uri of files) {
+  let files: vscode.Uri[] = [];
+  try {
+    files = await vscode.workspace.findFiles(includeGlob, exclude, maxFiles);
+  } catch (e) {
+    logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
+    console.log(`${timestamp()} [error] findFiles failed: ${String(e)}`);
+    return results;
+  }
+  logger.appendLine(`[SEARCH] Files to scan: ${files.length}`);
+  for (let i = 0; i < files.length; i++) {
+    const uri = files[i];
+    if (i % progressEvery === 0) {
+      const elapsed = Date.now() - t0;
+      logger.appendLine(`[PROGRESS] file ${i}/${files.length}, results=${results.length}, elapsedMs=${elapsed}`);
+      console.log(`${timestamp()} [info] [PROGRESS] ${i}/${files.length} results=${results.length} elapsedMs=${elapsed}`);
+    }
+    if (Date.now() - t0 > maxSearchMs) {
+      logger.appendLine(`[ABORT] Search timeout after ${Date.now() - t0}ms, returning partial results (${results.length})`);
+      console.log(`${timestamp()} [warn] [ABORT] search timeout, partial results=${results.length}`);
+      break;
+    }
     try {
       const doc = await vscode.workspace.openTextDocument(uri);
-      for (let lineNum = 0; lineNum < Math.min(doc.lineCount, 5000); lineNum++) {
+      const limit = Math.min(doc.lineCount, maxLinesPerFile);
+      let fileHits = 0;
+      for (let lineNum = 0; lineNum < limit; lineNum++) {
         const text = doc.lineAt(lineNum).text;
-        const matches = findAllWordHits(text, symbol);
+        const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
+        const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
+        const matches = matchMode === 'word' ? findAllWordHits(text, symbol) : findAllTextHits(text, symbol);
         for (const startCol of matches) {
           const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
           const preview = createPreview(text, range.start.character, symbol.length);
           const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
           node.symbolChildren = extractSymbolsFromLine(text, symbol).map(s => new InlineSymbolNode(s, node));
           results.push(node);
+          fileHits++;
         }
+      }
+      if (fileHits > 0 || verbose) {
+        logger.appendLine(`[FILE] ${vscode.workspace.asRelativePath(uri)} hits=${fileHits} scannedLines=${Math.min(doc.lineCount, maxLinesPerFile)}`);
       }
     } catch (e) {
       logger.appendLine(`[WARN] Failed to scan ${uri.fsPath}: ${String(e)}`);
     }
   }
 
-  logger.appendLine(`[RESULT] ${results.length} references for ${symbol}`);
+  const totalMs = Date.now() - t0;
+  logger.appendLine(`[RESULT] ${results.length} references for ${symbol} in ${totalMs}ms`);
+  console.log(`${timestamp()} [info] [RESULT] ${results.length} refs in ${totalMs}ms`);
   return results;
 }
 

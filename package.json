@@ -35,6 +35,56 @@
           "name": "References"
         }
       ]
+    },
+    "configuration": {
+      "title": "Code Explorer Pro",
+      "properties": {
+        "codeExplorerPro.includeGlob": {
+          "type": "string",
+          "default": "**/*",
+          "description": "Glob of files to include when scanning for references."
+        },
+        "codeExplorerPro.excludeGlob": {
+          "type": "string",
+          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**",
+          "description": "Glob of files/folders to exclude from scanning."
+        },
+        "codeExplorerPro.maxFiles": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "description": "Maximum number of files to scan per search."
+        },
+        "codeExplorerPro.maxLinesPerFile": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 1,
+          "description": "Maximum number of lines to scan per file."
+        },
+        "codeExplorerPro.progressEvery": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Log scan progress every N files."
+        },
+        "codeExplorerPro.maxSearchMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "Abort scan after this many milliseconds (partial results are returned)."
+        },
+        "codeExplorerPro.verboseLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log per-file summaries even if there were 0 hits."
+        },
+        "codeExplorerPro.matchMode": {
+          "type": "string",
+          "enum": ["text", "word"],
+          "default": "text",
+          "description": "How to match occurrences: raw text substring or identifier-bounded word."
+        }
+      }
     }
   },
   "scripts": {

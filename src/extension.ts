@@ -32,6 +32,141 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
+// Streaming variant: same search flow, but emits batches as files are processed.
+async function findReferencesByTextStream(
+  symbol: string,
+  logger: vscode.OutputChannel,
+  onBatch: (batch: ReferenceLineNode[]) => void
+): Promise<ReferenceLineNode[]> {
+  const results: ReferenceLineNode[] = [];
+  const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
+  const includeGlob = cfg.get<string>('includeGlob', '**/*');
+  const exclude = cfg.get<string>('excludeGlob', '**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**');
+  const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
+  const verbose = cfg.get<boolean>('verboseLogging', false);
+  const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
+  const maxFiles = cfg.get<number>('maxFiles', 1000);
+  const maxLinesPerFile = cfg.get<number>('maxLinesPerFile', 10000);
+  const progressEvery = cfg.get<number>('progressEvery', 50);
+
+  logger.appendLine(`[SEARCH] Streamed scan for text="${symbol}" include="${includeGlob}" exclude="${exclude}"`);
+  console.log(`${timestamp()} [info] [SEARCH] streamed text="${symbol}"`);
+  const t0 = Date.now();
+
+  const wordRegex = matchMode === 'word' ? new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(symbol)}(?![A-Za-z0-9_])`, 'g') : undefined;
+
+  let files: vscode.Uri[] = [];
+  try {
+    files = await vscode.workspace.findFiles(includeGlob, exclude);
+  } catch (e) {
+    logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
+    return results;
+  }
+
+  // Prioritize active file
+  const activeUri = vscode.window.activeTextEditor?.document.uri;
+  if (activeUri && activeUri.scheme === 'file') {
+    const hasActive = files.some(u => u.fsPath === activeUri.fsPath);
+    if (!hasActive) {
+      files.unshift(activeUri);
+    } else {
+      files = [activeUri, ...files.filter(u => u.fsPath !== activeUri.fsPath)];
+    }
+  }
+
+  const cts = new vscode.CancellationTokenSource();
+  const timeout = setTimeout(() => {
+    logger.appendLine(`[ABORT] Streamed search timeout after ${Date.now() - t0}ms, returning partial results (${results.length})`);
+    cts.cancel();
+  }, maxSearchMs);
+
+  const concurrency = 8;
+  let idx = 0;
+  let processed = 0;
+
+  async function worker() {
+    while (!cts.token.isCancellationRequested) {
+      const myIdx = idx++;
+      if (myIdx >= files.length) break;
+      const uri = files[myIdx];
+      const localBatch: ReferenceLineNode[] = [];
+      try {
+        const buf = await vscode.workspace.fs.readFile(uri);
+        const text = Buffer.from(buf).toString('utf8');
+        const lines = text.split(/\r?\n/);
+        const limit = Math.min(lines.length, maxLinesPerFile);
+        let fileHits = 0;
+        for (let lineNum = 0; lineNum < limit; lineNum++) {
+          const line = lines[lineNum];
+          if (!line) continue;
+          if (matchMode === 'word') {
+            wordRegex!.lastIndex = 0;
+            let m: RegExpExecArray | null;
+            while ((m = wordRegex!.exec(line)) !== null) {
+              const startCol = m.index;
+              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
+              const preview = createPreview(line, startCol, symbol.length);
+              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
+              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
+              results.push(node);
+              localBatch.push(node);
+              fileHits++;
+            }
+          } else {
+            let from = 0;
+            while (true) {
+              const idxFound = line.indexOf(symbol, from);
+              if (idxFound === -1) break;
+              const startCol = idxFound;
+              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
+              const preview = createPreview(line, startCol, symbol.length);
+              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
+              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
+              results.push(node);
+              localBatch.push(node);
+              fileHits++;
+              from = idxFound + symbol.length;
+            }
+          }
+        }
+        if (fileHits > 0 || verbose) {
+          logger.appendLine(`[FILE] ${vscode.workspace.asRelativePath(uri)} hits=${fileHits} scannedLines=${Math.min(lines.length, maxLinesPerFile)}`);
+        }
+      } catch (e) {
+        logger.appendLine(`[WARN] Failed to scan ${uri.fsPath}: ${String(e)}`);
+      }
+      processed++;
+      if (processed % progressEvery === 0) {
+        const elapsed = Date.now() - t0;
+        console.log(`${timestamp()} [info] [PROGRESS] ${processed}/${files.length} results=${results.length} elapsedMs=${elapsed}`);
+      }
+      // Emit batch for this file if there were new results
+      if (localBatch.length > 0) {
+        try {
+          onBatch(localBatch);
+        } catch (err) {
+          logger.appendLine(`[WARN] onBatch error: ${String(err)}`);
+        }
+      }
+      if (Date.now() - t0 > maxSearchMs) {
+        logger.appendLine(`[ABORT] Streamed search timeout during processing after ${Date.now() - t0}ms, returning partial results (${results.length})`);
+        break;
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, files.length) }, () => worker());
+  await Promise.all(workers);
+
+  clearTimeout(timeout);
+  const totalMs = Date.now() - t0;
+  if (verbose) {
+    logger.appendLine(`[RESULT] ${results.length} references for ${symbol} in ${totalMs}ms (streamed)`);
+  }
+  console.log(`${timestamp()} [info] [RESULT] ${results.length} refs in ${totalMs}ms (streamed)`);
+  return results;
+}
+
 export function deactivate() {
   // noop
 }
@@ -100,42 +235,67 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     }
     this.roots = [new BusyNode(`Searching "${symbol}"...`)];
     this._onDidChangeTreeData.fire(undefined);
-    // Perform search, group by file and prioritize current file/dir
-    const lines = await findReferencesByText(symbol, this.logger);
-    this.cache.set(symbol, lines);
+
+    // Incremental aggregation while streaming
     const byFile = new Map<string, ReferenceLineNode[]>();
-    for (const node of lines) {
-      const key = node.location.uri.fsPath;
-      const arr = byFile.get(key) ?? [];
-      arr.push(node);
-      byFile.set(key, arr);
-    }
-    const groups: FileGroupNode[] = [];
-    for (const [fsPath, children] of byFile) {
-      const label = vscode.workspace.asRelativePath(fsPath);
-      for (const ch of children) {
-        const ln = ch.location.range.start.line + 1;
-        ch.label = `${ln}  ${ch.preview.trim()}`;
-        ch.tooltip = `${vscode.workspace.asRelativePath(ch.location.uri)}:${ln}  ${ch.preview.trim()}`;
-      }
-      groups.push(new FileGroupNode(label, children, fsPath));
-    }
+    const seen = new Set<string>(); // fsPath:line:start
     const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
     const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
-    function groupScore(g: FileGroupNode): number {
-      if (!activeFsPath) return 0;
-      if (g.fsPath === activeFsPath) return 2;
-      if (activeDir && (g.fsPath.startsWith(activeDir + '/') || g.fsPath.startsWith(activeDir + '\\'))) return 1;
-      return 0;
-    }
-    groups.sort((a, b) => {
-      const sa = groupScore(a);
-      const sb = groupScore(b);
-      if (sa !== sb) return sb - sa;
-      return String(a.label).localeCompare(String(b.label));
+    const uiThrottleMs = 150; // simple throttle to avoid excessive refreshes
+    let lastUi = 0;
+
+    const rebuildAndRefresh = () => {
+      const groups: FileGroupNode[] = [];
+      for (const [fsPath, children] of byFile) {
+        const label = vscode.workspace.asRelativePath(fsPath);
+        for (const ch of children) {
+          const ln = ch.location.range.start.line + 1;
+          ch.label = `${ln}  ${ch.preview.trim()}`;
+          ch.tooltip = `${vscode.workspace.asRelativePath(ch.location.uri)}:${ln}  ${ch.preview.trim()}`;
+        }
+        groups.push(new FileGroupNode(label, children, fsPath));
+      }
+      function groupScore(g: FileGroupNode): number {
+        if (!activeFsPath) return 0;
+        if (g.fsPath === activeFsPath) return 2;
+        if (activeDir && (g.fsPath.startsWith(activeDir + '/') || g.fsPath.startsWith(activeDir + '\\'))) return 1;
+        return 0;
+      }
+      groups.sort((a, b) => {
+        const sa = groupScore(a);
+        const sb = groupScore(b);
+        if (sa !== sb) return sb - sa;
+        return String(a.label).localeCompare(String(b.label));
+      });
+      this.roots = groups.length ? groups : [new BusyNode(`Searching "${symbol}"...`)];
+      this._onDidChangeTreeData.fire(undefined);
+    };
+
+    // Perform streaming search, update the tree as batches arrive, but await completion
+    const lines = await findReferencesByTextStream(symbol, this.logger, (batch: ReferenceLineNode[]) => {
+      for (const node of batch) {
+        const fsPath = node.location.uri.fsPath;
+        const ln = node.location.range.start.line;
+        const col = node.location.range.start.character;
+        const uniq = `${fsPath}:${ln}:${col}`;
+        if (seen.has(uniq)) continue;
+        seen.add(uniq);
+        const arr = byFile.get(fsPath) ?? [];
+        arr.push(node);
+        byFile.set(fsPath, arr);
+      }
+      const now = Date.now();
+      if (now - lastUi >= uiThrottleMs) {
+        lastUi = now;
+        rebuildAndRefresh();
+      }
     });
-    this.roots = groups;
-    this._onDidChangeTreeData.fire(undefined);
+
+    // Finalize with complete results
+    const finalLines: ReferenceLineNode[] = [];
+    for (const arr of byFile.values()) finalLines.push(...arr);
+    this.cache.set(symbol, finalLines);
+    rebuildAndRefresh();
     // Clear message
     if (this.view) {
       try { (this.view as any).message = undefined; } catch {}
@@ -317,7 +477,7 @@ async function findReferencesByText(symbol: string, logger: vscode.OutputChannel
   // Collect files
   let files: vscode.Uri[] = [];
   try {
-    files = await vscode.workspace.findFiles(includeGlob, exclude, maxFiles);
+    files = await vscode.workspace.findFiles(includeGlob, exclude);
   } catch (e) {
     logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
     return results;

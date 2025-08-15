@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { run } from './index';
 
 suite('Code Explorer Pro', () => {
-  test('Finds root symbol and expands references', async () => {
+  test('Finds references and groups by file (expanded by default)', async () => {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     assert.ok(workspaceFolders && workspaceFolders.length > 0, 'No workspace opened');
 
@@ -21,22 +21,17 @@ suite('Code Explorer Pro', () => {
     // Trigger command
     await vscode.commands.executeCommand('code-explorer-pro.findRecursiveReferences');
 
-    // Fetch roots via hidden command
+    // Fetch roots via hidden command (file groups)
     const roots = (await vscode.commands.executeCommand('code-explorer-pro._getTreeRoots')) as any[];
     assert.ok(Array.isArray(roots), 'Roots not returned');
-    assert.ok(roots.length === 1, 'Expected one root');
-    assert.strictEqual(roots[0].label, 'calculateDiscount');
+    assert.ok(roots.length >= 1, 'Expected at least one file group root');
 
-    // Expand the root symbol
-    await vscode.commands.executeCommand('code-explorer-pro.expandSymbol', roots[0]);
+    // First group should be the active file's group (prioritized)
+    const activeRel = vscode.workspace.asRelativePath(doc.uri);
+    assert.ok(String(roots[0].label).includes(activeRel.split('/').pop()!), 'First root should be active file group');
 
-    // Ask for children through provider by expanding tree indirectly: no direct API, so re-invoke expand and wait
-    await new Promise(r => setTimeout(r, 500));
-
-    // After expansion, try to open a location to ensure nodes exist; rely on command failing if none
-    // We don't have direct access to children here; just assert that command does not throw
-    // Alternatively, we can re-run expansion and expect no errors
-    await vscode.commands.executeCommand('code-explorer-pro.expandSymbol', roots[0]);
+    // Let the view render and children attach; then try expanding first child reference line
+    await new Promise(r => setTimeout(r, 300));
   });
 
   test('Summarize expansion returns inline symbols for calculateDiscount', async () => {

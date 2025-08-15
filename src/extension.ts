@@ -97,10 +97,41 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     if (this.view) {
       this.view.title = `References for "${symbol}"`;
     }
-    // Perform search and cache results; tree root will be the symbol, with children grouped by file
+    // Perform search, group by file and prioritize current file/dir
     const lines = await findReferencesByText(symbol, this.logger);
     this.cache.set(symbol, lines);
-    this.roots = [new SymbolNode(symbol, undefined, this.logger)];
+    const byFile = new Map<string, ReferenceLineNode[]>();
+    for (const node of lines) {
+      const key = node.location.uri.fsPath;
+      const arr = byFile.get(key) ?? [];
+      arr.push(node);
+      byFile.set(key, arr);
+    }
+    const groups: FileGroupNode[] = [];
+    for (const [fsPath, children] of byFile) {
+      const label = vscode.workspace.asRelativePath(fsPath);
+      for (const ch of children) {
+        const ln = ch.location.range.start.line + 1;
+        ch.label = `${ln}  ${ch.preview.trim()}`;
+        ch.tooltip = `${vscode.workspace.asRelativePath(ch.location.uri)}:${ln}  ${ch.preview.trim()}`;
+      }
+      groups.push(new FileGroupNode(label, children, fsPath));
+    }
+    const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
+    function groupScore(g: FileGroupNode): number {
+      if (!activeFsPath) return 0;
+      if (g.fsPath === activeFsPath) return 2;
+      if (activeDir && (g.fsPath.startsWith(activeDir + '/') || g.fsPath.startsWith(activeDir + '\\'))) return 1;
+      return 0;
+    }
+    groups.sort((a, b) => {
+      const sa = groupScore(a);
+      const sb = groupScore(b);
+      if (sa !== sb) return sb - sa;
+      return String(a.label).localeCompare(String(b.label));
+    });
+    this.roots = groups;
     this._onDidChangeTreeData.fire(undefined);
     // Bring the view into focus so users see results immediately
     try {
@@ -136,51 +167,9 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       return element.children;
     }
     if (element instanceof SymbolNode) {
+      // Inline symbol expansion (child of a reference line): return raw reference lines
       this.logger.appendLine(`[CHEVRON] Symbol expand requested: ${element.symbol}`);
       console.log(`${timestamp()} [info] Chevron expand: symbol -> ${element.symbol}`);
-      // Root symbol (no parentRef): group results by file and apply prioritization
-      if (!element.parent) {
-        if (!this.cache.has(element.symbol)) {
-          await this.expandSymbol(element);
-        }
-        const lines = this.cache.get(element.symbol) ?? [];
-        const byFile = new Map<string, ReferenceLineNode[]>();
-        for (const node of lines) {
-          const key = node.location.uri.fsPath;
-          const arr = byFile.get(key) ?? [];
-          arr.push(node);
-          byFile.set(key, arr);
-        }
-        const groups: FileGroupNode[] = [];
-        for (const [fsPath, children] of byFile) {
-          const label = vscode.workspace.asRelativePath(fsPath);
-          // Update child labels to avoid repeating file path inside the group
-          for (const ch of children) {
-            const ln = ch.location.range.start.line + 1;
-            ch.label = `${ln}  ${ch.preview.trim()}`;
-            ch.tooltip = `${vscode.workspace.asRelativePath(ch.location.uri)}:${ln}  ${ch.preview.trim()}`;
-          }
-          groups.push(new FileGroupNode(label, children, fsPath));
-        }
-        // Prioritize: current file first, then same directory, then alphabetical
-        const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
-        const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
-        function groupScore(g: FileGroupNode): number {
-          if (!activeFsPath) return 0;
-          if (g.fsPath === activeFsPath) return 2;
-          if (activeDir && (g.fsPath.startsWith(activeDir + '/') || g.fsPath.startsWith(activeDir + '\\'))) return 1;
-          return 0;
-        }
-        groups.sort((a, b) => {
-          const sa = groupScore(a);
-          const sb = groupScore(b);
-          if (sa !== sb) return sb - sa; // higher score first
-          return String(a.label).localeCompare(String(b.label));
-        });
-        this.logger.appendLine(`[CHILDREN] Symbol ${element.symbol} -> ${groups.length} file groups`);
-        return groups;
-      }
-      // Inline symbol expansion (child of a reference line): return raw reference lines
       if (!element.children) {
         await this.expandSymbol(element);
       }

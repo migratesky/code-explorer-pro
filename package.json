@@ -2,7 +2,7 @@
   "name": "code-explorer-pro",
   "displayName": "Code Explorer Pro",
   "description": "Recursive reference search for VS Code",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.89.0"
   },

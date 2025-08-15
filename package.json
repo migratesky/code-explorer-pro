@@ -48,12 +48,12 @@
         },
         "codeExplorerPro.excludeGlob": {
           "type": "string",
-          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache,.jar,.mypy_cache,.venv,.venv,.venv}/**",
+          "default": "**/**jar,**/**.jar,**/**war,**/**zip,**/**tar,**/**gz,**/**bz2,**/**7z,**/**rar,**/**iso,**/**dmg,**/**exe,**/**msi,**/**app,**/**pkg,**/**deb,**/**rpm,**/**apk,**/**ipa,**/**xpi,**/**class,**/target/**/classes/**,**/node_modules/**,**/dist/**,**/out/**,**/build/**,**/.git/**,**/.venv/**,**/venv/**,**/.tox/**,**/.cache/**,**/.mypy_cache/**",
           "description": "Glob of files/folders to exclude from scanning."
         },
         "codeExplorerPro.maxFiles": {
           "type": "number",
-          "default": 10000,
+          "default": 50000,
           "minimum": 1,
           "description": "Maximum number of files to scan per search."
         },

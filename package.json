@@ -48,12 +48,12 @@
         },
         "codeExplorerPro.excludeGlob": {
           "type": "string",
-          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**",
+          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache,.jar}/**",
           "description": "Glob of files/folders to exclude from scanning."
         },
         "codeExplorerPro.maxFiles": {
           "type": "number",
-          "default": 1000,
+          "default": 10000,
           "minimum": 1,
           "description": "Maximum number of files to scan per search."
         },

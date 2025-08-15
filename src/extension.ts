@@ -93,10 +93,13 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
 
     this.logger.appendLine(`[START] Search for text: ${symbol}`);
     console.log(`${timestamp()} [info] Root search for symbol: ${symbol}`);
-    // Update view title with the query
+    // Show busy node and plain-text title/message while scanning
     if (this.view) {
       this.view.title = `References for "${symbol}"`;
+      try { (this.view as any).message = 'Scanning workspace files...'; } catch {}
     }
+    this.roots = [new BusyNode(`Searching "${symbol}"...`)];
+    this._onDidChangeTreeData.fire(undefined);
     // Perform search, group by file and prioritize current file/dir
     const lines = await findReferencesByText(symbol, this.logger);
     this.cache.set(symbol, lines);
@@ -133,6 +136,10 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     });
     this.roots = groups;
     this._onDidChangeTreeData.fire(undefined);
+    // Clear message
+    if (this.view) {
+      try { (this.view as any).message = undefined; } catch {}
+    }
     // Bring the view into focus so users see results immediately
     try {
       await vscode.commands.executeCommand('codeExplorerProReferences.focus');
@@ -207,7 +214,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 }
 
-type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode;
+type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode | BusyNode;
 
 class SymbolNode extends vscode.TreeItem {
   public children?: ReferenceLineNode[];
@@ -265,6 +272,14 @@ class InlineSymbolNode extends vscode.TreeItem {
       command: 'code-explorer-pro.expandSymbol',
       arguments: [new SymbolNode(symbol, parentRef)]
     };
+  }
+}
+
+class BusyNode extends vscode.TreeItem {
+  constructor(label: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = 'busy';
+    this.iconPath = new vscode.ThemeIcon('sync~spin');
   }
 }
 

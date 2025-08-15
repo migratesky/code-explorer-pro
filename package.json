@@ -48,7 +48,7 @@
         },
         "codeExplorerPro.excludeGlob": {
           "type": "string",
-          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache,.jar}/**",
+          "default": "**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache,.jar,.mypy_cache,.venv,.venv,.venv}/**",
           "description": "Glob of files/folders to exclude from scanning."
         },
         "codeExplorerPro.maxFiles": {

@@ -48,6 +48,7 @@ async function findReferencesByTextStream(
   const maxFiles = cfg.get<number>('maxFiles', 1000);
   const maxLinesPerFile = cfg.get<number>('maxLinesPerFile', 10000);
   const progressEvery = cfg.get<number>('progressEvery', 50);
+  const excludeFileExtensions = cfg.get<string[]>('excludeFileExtensions', []);
 
   logger.appendLine(`[SEARCH] Streamed scan for text="${symbol}" include="${includeGlob}" exclude="${exclude}"`);
   console.log(`${timestamp()} [info] [SEARCH] streamed text="${symbol}"`);
@@ -58,6 +59,7 @@ async function findReferencesByTextStream(
   let files: vscode.Uri[] = [];
   try {
     files = await vscode.workspace.findFiles(includeGlob, exclude);
+     files = files.filter(f => !excludeFileExtensions.some(ext => f.fsPath.endsWith(ext)));    
   } catch (e) {
     logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
     return results;
@@ -243,6 +245,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
     const uiThrottleMs = 150; // simple throttle to avoid excessive refreshes
     let lastUi = 0;
+    let streamingComplete = false;
 
     const rebuildAndRefresh = () => {
       const groups: FileGroupNode[] = [];
@@ -267,7 +270,12 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
         if (sa !== sb) return sb - sa;
         return String(a.label).localeCompare(String(b.label));
       });
-      this.roots = groups.length ? groups : [new BusyNode(`Searching "${symbol}"...`)];
+      // Keep spinner visible while streaming, but do not disrupt first group position
+      if (!streamingComplete) {
+        this.roots = groups.length ? [...groups, new BusyNode(`Searching "${symbol}"...`)] : [new BusyNode(`Searching "${symbol}"...`)];
+      } else {
+        this.roots = groups;
+      }
       this._onDidChangeTreeData.fire(undefined);
     };
 
@@ -295,6 +303,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     const finalLines: ReferenceLineNode[] = [];
     for (const arr of byFile.values()) finalLines.push(...arr);
     this.cache.set(symbol, finalLines);
+    streamingComplete = true;
     rebuildAndRefresh();
     // Clear message
     if (this.view) {

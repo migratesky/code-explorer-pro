@@ -46,9 +46,19 @@
           "default": "**/*",
           "description": "Glob of files to include when scanning for references."
         },
+        "codeExplorerPro.excludeFileExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["jar", "war", "zip", "tar", "gz", "bz2", "7z", "rar", "iso", "dmg", "exe", "msi", "app", "pkg", "deb", "rpm", "apk", "ipa", "xpi", "class"],
+          "description": "List of file extensions to exclude from scanning."
+        },
         "codeExplorerPro.excludeGlob": {
           "type": "string",
-          "default": "**/**jar,**/**.jar,**/**war,**/**zip,**/**tar,**/**gz,**/**bz2,**/**7z,**/**rar,**/**iso,**/**dmg,**/**exe,**/**msi,**/**app,**/**pkg,**/**deb,**/**rpm,**/**apk,**/**ipa,**/**xpi,**/**class,**/target/**/classes/**,**/node_modules/**,**/dist/**,**/out/**,**/build/**,**/.git/**,**/.venv/**,**/venv/**,**/.tox/**,**/.cache/**,**/.mypy_cache/**",
+          "default1": "**/**jar,**/**.jar,**/**war,**/**zip,**/**tar,**/**gz,**/**bz2,**/**7z,**/**rar,**/**iso,**/**dmg,**/**exe,**/**msi,**/**app,**/**pkg,**/**deb,**/**rpm,**/**apk,**/**ipa,**/**xpi,**/**class,**/target/**/classes/**,**/node_modules/**,**/dist/**,**/out/**,**/build/**,**/.git/**,**/.venv/**,**/venv/**,**/.tox/**,**/.cache/**,**/.mypy_cache/**",
+          "default": "**/target/**/classes/**,**/node_modules/**,**/dist/**,**/out/**,**/build/**,**/.git/**,**/.venv/**,**/venv/**,**/.tox/**,**/.cache/**,**/.mypy_cache/**",
+          "default2": "**/*.jar,**/*.txt",
           "description": "Glob of files/folders to exclude from scanning."
         },
         "codeExplorerPro.maxFiles": {

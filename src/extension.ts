@@ -199,12 +199,14 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   async findRecursiveReferences() {
     const editor = vscode.window.activeTextEditor;
     let defaultText = '';
+    let position: vscode.Position | undefined;
     if (editor) {
       const sel = editor.selection;
       if (sel && !sel.isEmpty) {
         defaultText = editor.document.getText(sel).trim();
+        position = sel.active;
       } else {
-        const position = sel?.active ?? editor.selection.active;
+        position = sel?.active ?? editor.selection.active;
         const wordRange = editor.document.getWordRangeAtPosition(position);
         if (wordRange) defaultText = editor.document.getText(wordRange);
       }
@@ -237,6 +239,59 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     }
     this.roots = [new BusyNode(`Searching "${symbol}"...`)];
     this._onDidChangeTreeData.fire(undefined);
+    
+    // Get symbol references and call hierarchy if we have a position
+    let symbolReferencesNode: SymbolReferencesNode | undefined;
+    let callHierarchyNode: CallHierarchyNode | undefined;
+    
+    if (editor && position) {
+      try {
+        // Get symbol references
+        const references = await vscode.commands.executeCommand<vscode.Location[]>(
+          'vscode.executeReferenceProvider',
+          editor.document.uri,
+          position
+        );
+        
+        if (references && references.length > 0) {
+          symbolReferencesNode = new SymbolReferencesNode(symbol, references);
+          // Convert locations to ReferenceLineNode objects
+          for (const location of references) {
+            try {
+              const doc = await vscode.workspace.openTextDocument(location.uri);
+              const line = doc.lineAt(location.range.start.line).text;
+              const startCol = location.range.start.character;
+              const preview = createPreview(line, startCol, symbol.length);
+              const node = new ReferenceLineNode(location, preview, symbol);
+              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
+              symbolReferencesNode.children.push(node);
+            } catch (err) {
+              this.logger.appendLine(`[ERROR] Failed to process reference: ${String(err)}`);
+            }
+          }
+        }
+        
+        // Get call hierarchy
+        const callHierarchyItems = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+          'vscode.prepareCallHierarchy',
+          editor.document.uri,
+          position
+        );
+        
+        if (callHierarchyItems && callHierarchyItems.length > 0) {
+          const incomingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+            'vscode.executeCallHierarchyIncomingCalls',
+            callHierarchyItems[0]
+          );
+          
+          if (incomingCalls && incomingCalls.length > 0) {
+            callHierarchyNode = new CallHierarchyNode(symbol, incomingCalls);
+          }
+        }
+      } catch (err) {
+        this.logger.appendLine(`[ERROR] Failed to get symbol references or call hierarchy: ${String(err)}`);
+      }
+    }
 
     // Incremental aggregation while streaming
     const byFile = new Map<string, ReferenceLineNode[]>();
@@ -270,11 +325,28 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
         if (sa !== sb) return sb - sa;
         return String(a.label).localeCompare(String(b.label));
       });
+      
+      // Prepare the roots array with symbol references and call hierarchy at the top
+      const roots: TreeNode[] = [];
+      
+      // Add symbol references if available
+      if (symbolReferencesNode && symbolReferencesNode.children.length > 0) {
+        roots.push(symbolReferencesNode);
+      }
+      
+      // Add call hierarchy if available
+      if (callHierarchyNode && callHierarchyNode.callItems.length > 0) {
+        roots.push(callHierarchyNode);
+      }
+      
+      // Add file groups
+      roots.push(...groups);
+      
       // Keep spinner visible while streaming, but do not disrupt first group position
       if (!streamingComplete) {
-        this.roots = groups.length ? [...groups, new BusyNode(`Searching "${symbol}"...`)] : [new BusyNode(`Searching "${symbol}"...`)];
+        this.roots = roots.length ? [...roots, new BusyNode(`Searching "${symbol}"...`)] : [new BusyNode(`Searching "${symbol}"...`)];
       } else {
-        this.roots = groups;
+        this.roots = roots;
       }
       this._onDidChangeTreeData.fire(undefined);
     };
@@ -365,6 +437,39 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       await this.expandSymbol(temp);
       return temp.children ?? [];
     }
+    if (element instanceof SymbolReferencesNode) {
+      this.logger.appendLine(`[CHEVRON] Symbol references expand requested`);
+      console.log(`${timestamp()} [info] Chevron expand: symbol references`);
+      return element.children;
+    }
+    if (element instanceof CallHierarchyNode) {
+      this.logger.appendLine(`[CHEVRON] Call hierarchy expand requested`);
+      console.log(`${timestamp()} [info] Chevron expand: call hierarchy`);
+      
+      // Convert call hierarchy items to ReferenceLineNode objects for display
+      const nodes: ReferenceLineNode[] = [];
+      for (const call of element.callItems) {
+        try {
+          const location = call.from.selectionRange;
+          const uri = call.from.uri;
+          const doc = await vscode.workspace.openTextDocument(uri);
+          const line = doc.lineAt(location.start.line).text;
+          const startCol = location.start.character;
+          const preview = createPreview(line, startCol, call.from.name.length);
+          const node = new ReferenceLineNode(
+            new vscode.Location(uri, location),
+            preview,
+            call.from.name
+          );
+          node.symbolChildren = extractSymbolsFromLine(line, call.from.name)
+            .map(s => new InlineSymbolNode(s, node));
+          nodes.push(node);
+        } catch (err) {
+          this.logger.appendLine(`[ERROR] Failed to process call hierarchy item: ${String(err)}`);
+        }
+      }
+      return nodes;
+    }
     return [];
   }
 
@@ -383,7 +488,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 }
 
-type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode | BusyNode;
+type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode | BusyNode | SymbolReferencesNode | CallHierarchyNode;
 
 class SymbolNode extends vscode.TreeItem {
   public children?: ReferenceLineNode[];
@@ -449,6 +554,28 @@ class BusyNode extends vscode.TreeItem {
     super(label, vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'busy';
     this.iconPath = new vscode.ThemeIcon('sync~spin');
+  }
+}
+
+class SymbolReferencesNode extends vscode.TreeItem {
+  public children: ReferenceLineNode[] = [];
+  constructor(public readonly symbol: string, public readonly locations: vscode.Location[]) {
+    super('Symbol References', vscode.TreeItemCollapsibleState.Expanded);
+    this.contextValue = 'symbolReferences';
+    this.iconPath = new vscode.ThemeIcon('references');
+    this.description = `${locations.length} references`;
+    this.tooltip = `${locations.length} references for ${symbol}`;
+  }
+}
+
+class CallHierarchyNode extends vscode.TreeItem {
+  public children: vscode.CallHierarchyItem[] = [];
+  constructor(public readonly symbol: string, public readonly callItems: vscode.CallHierarchyIncomingCall[]) {
+    super('Call Hierarchy', vscode.TreeItemCollapsibleState.Expanded);
+    this.contextValue = 'callHierarchy';
+    this.iconPath = new vscode.ThemeIcon('call-incoming');
+    this.description = `${callItems.length} callers`;
+    this.tooltip = `${callItems.length} callers for ${symbol}`;
   }
 }
 

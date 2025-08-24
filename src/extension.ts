@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { createPreview, extractSymbolsFromLine, findAllWordHits, findAllTextHits } from './core/analysis';
+import { findReferencesParallel } from './core/parallelSearch';
 
 export function activate(context: vscode.ExtensionContext) {
   console.log(`${timestamp()} [info] Activating extension code-explorer-pro`);
@@ -38,7 +39,6 @@ async function findReferencesByTextStream(
   logger: vscode.OutputChannel,
   onBatch: (batch: ReferenceLineNode[]) => void
 ): Promise<ReferenceLineNode[]> {
-  const results: ReferenceLineNode[] = [];
   const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
   const includeGlob = cfg.get<string>('includeGlob', '**/*');
   const exclude = cfg.get<string>('excludeGlob', '**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**');
@@ -46,7 +46,6 @@ async function findReferencesByTextStream(
   const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
   const verbose = cfg.get<boolean>('verboseLogging', false);
   const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
-  const maxFiles = cfg.get<number>('maxFiles', 1000);
   const maxLinesPerFile = cfg.get<number>('maxLinesPerFile', 10000);
   const progressEvery = cfg.get<number>('progressEvery', 50);
   const excludeFileExtensions = cfg.get<string[]>('excludeFileExtensions', []);
@@ -55,6 +54,7 @@ async function findReferencesByTextStream(
   console.log(`${timestamp()} [info] [SEARCH] streamed text="${symbol}"`);
   const t0 = Date.now();
 
+  // Create word regex for word-based matching
   const wordRegex = matchMode === 'word' ? new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(symbol)}(?![A-Za-z0-9_])`, 'g') : undefined;
 
   let files: vscode.Uri[] = [];
@@ -65,7 +65,7 @@ async function findReferencesByTextStream(
     files = files.filter(f => !excludeFolders.some(g => vscode.workspace.asRelativePath(f).match(g)));
   } catch (e) {
     logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
-    return results;
+    return [];
   }
 
   // Prioritize active file
@@ -78,102 +78,27 @@ async function findReferencesByTextStream(
       files = [activeUri, ...files.filter(u => u.fsPath !== activeUri.fsPath)];
     }
   }
-
-  const cts = new vscode.CancellationTokenSource();
-  const timeout = setTimeout(() => {
-    logger.appendLine(`[ABORT] Streamed search timeout after ${Date.now() - t0}ms, returning partial results (${results.length})`);
-    cts.cancel();
-  }, maxSearchMs);
-
-  const concurrency = 8;
-  let idx = 0;
-  let processed = 0;
-
-  async function worker() {
-    while (!cts.token.isCancellationRequested) {
-      const myIdx = idx++;
-      if (myIdx >= files.length) break;
-      const uri = files[myIdx];
-      const localBatch: ReferenceLineNode[] = [];
-      try {
-        const buf = await vscode.workspace.fs.readFile(uri);
-        const text = Buffer.from(buf).toString('utf8');
-        const lines = text.split(/\r?\n/);
-        const limit = Math.min(lines.length, maxLinesPerFile);
-        let fileHits = 0;
-        for (let lineNum = 0; lineNum < limit; lineNum++) {
-          const line = lines[lineNum];
-          if (!line) continue;
-          if (matchMode === 'word') {
-            wordRegex!.lastIndex = 0;
-            let m: RegExpExecArray | null;
-            while ((m = wordRegex!.exec(line)) !== null) {
-              const startCol = m.index;
-              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
-              const preview = createPreview(line, startCol, symbol.length);
-              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
-              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
-              results.push(node);
-              localBatch.push(node);
-              fileHits++;
-            }
-          } else {
-            let from = 0;
-            while (true) {
-              const idxFound = line.indexOf(symbol, from);
-              if (idxFound === -1) break;
-              const startCol = idxFound;
-              const range = new vscode.Range(new vscode.Position(lineNum, startCol), new vscode.Position(lineNum, startCol + symbol.length));
-              const preview = createPreview(line, startCol, symbol.length);
-              const node = new ReferenceLineNode(new vscode.Location(uri, range), preview, symbol);
-              node.symbolChildren = extractSymbolsFromLine(line, symbol).map(s => new InlineSymbolNode(s, node));
-              results.push(node);
-              localBatch.push(node);
-              fileHits++;
-              from = idxFound + symbol.length;
-            }
-          }
-        }
-        if (fileHits > 0 || verbose) {
-          logger.appendLine(`[FILE] ${vscode.workspace.asRelativePath(uri)} hits=${fileHits} scannedLines=${Math.min(lines.length, maxLinesPerFile)}`);
-        }
-      } catch (e) {
-        logger.appendLine(`[WARN] Failed to scan ${uri.fsPath}: ${String(e)}`);
-      }
-      processed++;
-      if (processed % progressEvery === 0) {
-        const elapsed = Date.now() - t0;
-        console.log(`${timestamp()} [info] [PROGRESS] ${processed}/${files.length} results=${results.length} elapsedMs=${elapsed}`);
-      }
-      // Emit batch for this file if there were new results
-      if (localBatch.length > 0) {
-        try {
-          onBatch(localBatch);
-        } catch (err) {
-          logger.appendLine(`[WARN] onBatch error: ${String(err)}`);
-        }
-      }
-      if (Date.now() - t0 > maxSearchMs) {
-        logger.appendLine(`[ABORT] Streamed search timeout during processing after ${Date.now() - t0}ms, returning partial results (${results.length})`);
-        break;
-      }
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, files.length) }, () => worker());
-  await Promise.all(workers);
-
-  clearTimeout(timeout);
-  const totalMs = Date.now() - t0;
-  if (verbose) {
-    logger.appendLine(`[RESULT] ${results.length} references for ${symbol} in ${totalMs}ms (streamed)`);
-  }
-  console.log(`${timestamp()} [info] [RESULT] ${results.length} refs in ${totalMs}ms (streamed)`);
-  return results;
+  
+  // Use the optimized parallel search implementation
+  return findReferencesParallel(symbol, files, logger, onBatch, {
+    matchMode,
+    maxSearchMs,
+    maxLinesPerFile,
+    progressEvery,
+    verbose,
+    wordRegex
+  });
 }
 
 export function deactivate() {
   // noop
+}
+
+/**
+ * Helper function to escape special regex characters
+ */
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
@@ -677,7 +602,7 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 }
 
-type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode | BusyNode | SymbolReferencesNode | CallHierarchyNode;
+export type TreeNode = SymbolNode | FileGroupNode | ReferenceLineNode | InlineSymbolNode | BusyNode | SymbolReferencesNode | CallHierarchyNode;
 
 class SymbolNode extends vscode.TreeItem {
   public children?: ReferenceLineNode[];
@@ -704,7 +629,7 @@ class FileGroupNode extends vscode.TreeItem {
   }
 }
 
-class ReferenceLineNode extends vscode.TreeItem {
+export class ReferenceLineNode extends vscode.TreeItem {
   public symbolChildren: InlineSymbolNode[] = [];
   constructor(
     public readonly location: vscode.Location,
@@ -724,7 +649,7 @@ class ReferenceLineNode extends vscode.TreeItem {
   }
 }
 
-class InlineSymbolNode extends vscode.TreeItem {
+export class InlineSymbolNode extends vscode.TreeItem {
   constructor(public readonly symbol: string, public parentRef: ReferenceLineNode) {
     super(symbol, vscode.TreeItemCollapsibleState.Collapsed);
     this.contextValue = 'inlineSymbol';
@@ -902,9 +827,7 @@ async function findReferencesByText(symbol: string, logger: vscode.OutputChannel
   return results;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+// escapeRegExp function is now defined at the top of the file
 
 // helpers now imported from ./core/analysis
 

@@ -636,7 +636,7 @@ export class ReferenceLineNode extends vscode.TreeItem {
     public readonly preview: string,
     public readonly matchedSymbol: string
   ) {
-    super(`${vscode.workspace.asRelativePath(location.uri)}:${location.range.start.line + 1}  ${preview.trim()}`,
+    super(`${preview.trim()} — ${vscode.workspace.asRelativePath(location.uri)}:${location.range.start.line + 1}`,
       vscode.TreeItemCollapsibleState.Collapsed);
     this.contextValue = 'referenceLine';
     this.iconPath = new vscode.ThemeIcon('link');

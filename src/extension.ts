@@ -42,6 +42,7 @@ async function findReferencesByTextStream(
   const cfg = vscode.workspace.getConfiguration('codeExplorerPro');
   const includeGlob = cfg.get<string>('includeGlob', '**/*');
   const exclude = cfg.get<string>('excludeGlob', '**/{node_modules,dist,out,build,.git,.venv,venv,.tox,.cache}/**');
+  const excludeFolders = cfg.get<string[]>('excludeFolders', []);
   const maxSearchMs = cfg.get<number>('maxSearchMs', 15000);
   const verbose = cfg.get<boolean>('verboseLogging', false);
   const matchMode = cfg.get<'word' | 'text'>('matchMode', 'text');
@@ -59,7 +60,9 @@ async function findReferencesByTextStream(
   let files: vscode.Uri[] = [];
   try {
     files = await vscode.workspace.findFiles(includeGlob, exclude);
-     files = files.filter(f => !excludeFileExtensions.some(ext => f.fsPath.endsWith(ext)));    
+    files = files.filter(f => !excludeFileExtensions.some(ext => f.fsPath.endsWith(ext)));    
+    //filter exclude folders
+    files = files.filter(f => !excludeFolders.some(g => vscode.workspace.asRelativePath(f).match(g)));
   } catch (e) {
     logger.appendLine(`[ERROR] findFiles failed: ${String(e)}`);
     return results;
@@ -228,6 +231,17 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
     // Clear previous results
     this.roots = [new BusyNode(`Searching "${symbol}"...`)];
     this._onDidChangeTreeData.fire(undefined);
+    
+    // Focus the tree view immediately
+    if (this.view) {
+      this.logger.appendLine(`[UI] Revealing tree view`);
+      console.log(`${timestamp()} [info] [UI] Revealing tree view`);
+      try {
+        await this.view.reveal(this.roots[0], { focus: true, select: true });
+      } catch (err) {
+        this.logger.appendLine(`[ERROR] Failed to reveal tree view: ${String(err)}`);
+      }
+    }
     
     // Variables to store LSP results
     let symbolReferencesNode: SymbolReferencesNode | undefined;

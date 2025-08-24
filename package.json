@@ -26,8 +26,7 @@
       {
         "command": "code-explorer-pro.findRecursiveReferences",
         "key": "ctrl+shift+space",
-        "mac": "ctrl+shift+space",
-        "when": "editorTextFocus && !editorReadonly"
+        "mac": "ctrl+shift+space"
       }
     ],
     "views": {

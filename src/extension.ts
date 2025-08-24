@@ -183,6 +183,8 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   private selectionHandler?: vscode.Disposable;
 
   constructor(private logger: vscode.OutputChannel) {}
+  
+  // TreeDataProvider interface implementation is implemented below
 
   attachView(view: vscode.TreeView<TreeNode>) {
     this.view = view;
@@ -197,55 +199,51 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   async findRecursiveReferences() {
+    this.logger.appendLine(`[FIND] Recursive references`);
+    console.log(`${timestamp()} [info] Find recursive references`);
+    
     const editor = vscode.window.activeTextEditor;
-    let defaultText = '';
-    let position: vscode.Position | undefined;
-    if (editor) {
-      const sel = editor.selection;
-      if (sel && !sel.isEmpty) {
-        defaultText = editor.document.getText(sel).trim();
-        position = sel.active;
-      } else {
-        position = sel?.active ?? editor.selection.active;
-        const wordRange = editor.document.getWordRangeAtPosition(position);
-        if (wordRange) defaultText = editor.document.getText(wordRange);
-      }
+    if (!editor) {
+      this.logger.appendLine(`[ERROR] No active editor`);
+      return;
     }
-
-    let symbol = defaultText.trim();
-    if (!symbol) {
-      const query = await vscode.window.showInputBox({
-        prompt: 'Search project (free text)',
-        placeHolder: 'Enter text to search',
-        value: defaultText,
-        ignoreFocusOut: true
-      });
-
-      symbol = (query ?? '').trim();
-      if (!symbol) {
-        vscode.window.showInformationMessage('No search text provided');
-        this.logger.appendLine('[INFO] No search text provided');
-        console.log(`${timestamp()} [info] No search text provided`);
-        return;
-      }
+    
+    const position = editor.selection.active;
+    const document = editor.document;
+    const wordRange = document.getWordRangeAtPosition(position);
+    if (!wordRange) {
+      this.logger.appendLine(`[ERROR] No word at cursor position`);
+      return;
     }
-
-    this.logger.appendLine(`[START] Search for text: ${symbol}`);
-    console.log(`${timestamp()} [info] Root search for symbol: ${symbol}`);
-    // Show busy node and plain-text title/message while scanning
+    
+    const symbol = document.getText(wordRange);
+    this.logger.appendLine(`[FIND] Symbol: ${symbol}`);
+    console.log(`${timestamp()} [info] Symbol: ${symbol}`);
+    
+    // Show a message in the view while loading
     if (this.view) {
-      this.view.title = `References for "${symbol}"`;
-      try { (this.view as any).message = 'Scanning workspace files...'; } catch {}
+      try { (this.view as any).message = `Searching for "${symbol}"...`; } catch {}
     }
+    
+    // Clear previous results
     this.roots = [new BusyNode(`Searching "${symbol}"...`)];
     this._onDidChangeTreeData.fire(undefined);
     
-    // Get symbol references and call hierarchy if we have a position
+    // Variables to store LSP results
     let symbolReferencesNode: SymbolReferencesNode | undefined;
     let callHierarchyNode: CallHierarchyNode | undefined;
     
-    if (editor && position) {
-      try {
+    // Variables for incremental aggregation while streaming
+    const byFile = new Map<string, ReferenceLineNode[]>();
+    const seen = new Set<string>(); // fsPath:line:start
+    const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
+    let streamingComplete = false;
+    let lastUi = 0;
+    const uiThrottleMs = 150; // simple throttle to avoid excessive refreshes
+    
+    // Try to get symbol references and call hierarchy using LSP
+    try {
         // Get symbol references
         const references = await vscode.commands.executeCommand<vscode.Location[]>(
           'vscode.executeReferenceProvider',
@@ -271,36 +269,112 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
           }
         }
         
-        // Get call hierarchy
-        const callHierarchyItems = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
-          'vscode.prepareCallHierarchy',
-          editor.document.uri,
-          position
-        );
-        
-        if (callHierarchyItems && callHierarchyItems.length > 0) {
-          const incomingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
-            'vscode.executeCallHierarchyIncomingCalls',
-            callHierarchyItems[0]
+        // Try to get call hierarchy using the format you suggested
+        try {
+          // Use let instead of const as suggested
+          let callHierarchyItems = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+            'vscode.prepareCallHierarchy',
+            editor.document.uri,
+            position
           );
           
-          if (incomingCalls && incomingCalls.length > 0) {
-            callHierarchyNode = new CallHierarchyNode(symbol, incomingCalls);
+          this.logger.appendLine(`[CALL_HIERARCHY] prepareCallHierarchy returned ${callHierarchyItems?.length || 0} items`);
+          console.log(`${timestamp()} [info] [CALL_HIERARCHY] prepareCallHierarchy returned ${callHierarchyItems?.length || 0} items`);
+          
+          if (callHierarchyItems && callHierarchyItems.length > 0) {
+            this.logger.appendLine(`[CALL_HIERARCHY] First item: ${callHierarchyItems[0].name}, kind: ${callHierarchyItems[0].kind}`);
+            
+            try {
+              // Try the new approach using vscode.provideIncomingCalls
+              this.logger.appendLine(`[CALL_HIERARCHY] Attempting to use vscode.provideIncomingCalls`);
+              console.log(`${timestamp()} [info] [CALL_HIERARCHY] Attempting to use vscode.provideIncomingCalls`);
+              
+              try {
+                // Log the call hierarchy item details for debugging
+                this.logger.appendLine(`[CALL_HIERARCHY] Item details: name=${callHierarchyItems[0].name}, kind=${callHierarchyItems[0].kind}`);
+                console.log(`${timestamp()} [info] [CALL_HIERARCHY] Item details: name=${callHierarchyItems[0].name}, kind=${callHierarchyItems[0].kind}`);
+                
+                // Use vscode.provideIncomingCalls as in your example
+                let incomingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+                  'vscode.provideIncomingCalls',
+                  callHierarchyItems[0]
+                );
+                
+                this.logger.appendLine(`[CALL_HIERARCHY] provideIncomingCalls executed, got ${incomingCalls?.length || 0} incoming calls`);
+                console.log(`${timestamp()} [info] [CALL_HIERARCHY] provideIncomingCalls executed, got ${incomingCalls?.length || 0} incoming calls`);
+                
+                if (incomingCalls && incomingCalls.length > 0) {
+                  callHierarchyNode = new CallHierarchyNode(symbol, incomingCalls);
+                  this.logger.appendLine(`[CALL_HIERARCHY] Created CallHierarchyNode with ${incomingCalls.length} calls`);
+                } else {
+                  // If no incoming calls found with provideIncomingCalls, try executeCallHierarchyIncomingCalls
+                  this.logger.appendLine(`[CALL_HIERARCHY] No incoming calls found with provideIncomingCalls, trying executeCallHierarchyIncomingCalls`);
+                  console.log(`${timestamp()} [info] [CALL_HIERARCHY] No incoming calls found with provideIncomingCalls, trying executeCallHierarchyIncomingCalls`);
+                  
+                  try {
+                    incomingCalls = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+                      'vscode.executeCallHierarchyIncomingCalls',
+                      callHierarchyItems[0]
+                    );
+                    
+                    if (incomingCalls && incomingCalls.length > 0) {
+                      callHierarchyNode = new CallHierarchyNode(symbol, incomingCalls);
+                    } else {
+                      this.logger.appendLine(`[CALL_HIERARCHY] No incoming calls found with either method, trying fallback`);
+                      console.log(`${timestamp()} [info] [CALL_HIERARCHY] No incoming calls found with either method, trying fallback`);
+                      callHierarchyNode = await this.useFallbackCallHierarchy(editor, symbol);
+                    }
+                  } catch (innerErr) {
+                    this.logger.appendLine(`[CALL_HIERARCHY] executeCallHierarchyIncomingCalls failed: ${String(innerErr)}, trying fallback`);
+                    console.log(`${timestamp()} [info] [CALL_HIERARCHY] executeCallHierarchyIncomingCalls failed: ${String(innerErr)}, trying fallback`);
+                    callHierarchyNode = await this.useFallbackCallHierarchy(editor, symbol);
+                  }
+                }
+              } catch (err) {
+                // If the command fails, use the fallback
+                this.logger.appendLine(`[CALL_HIERARCHY] provideIncomingCalls failed: ${String(err)}, using fallback`);
+                console.log(`${timestamp()} [info] [CALL_HIERARCHY] provideIncomingCalls failed: ${String(err)}, using fallback`);
+                
+                // Use the fallback approach
+                this.logger.appendLine(`[CALL_HIERARCHY] About to call useFallbackCallHierarchy`);
+                console.log(`${timestamp()} [info] [CALL_HIERARCHY] About to call useFallbackCallHierarchy`);
+                
+                const fallbackNode = await this.useFallbackCallHierarchy(editor, symbol);
+                
+                this.logger.appendLine(`[CALL_HIERARCHY] Fallback returned: ${fallbackNode ? 'results found' : 'no results'}`);
+                console.log(`${timestamp()} [info] [CALL_HIERARCHY] Fallback returned: ${fallbackNode ? 'results found' : 'no results'}`);
+                
+                if (fallbackNode) {
+                  callHierarchyNode = fallbackNode;
+                }
+              }
+            } catch (err) {
+              this.logger.appendLine(`[CALL_HIERARCHY] Error executing call hierarchy command: ${String(err)}`);
+              console.log(`${timestamp()} [error] [CALL_HIERARCHY] Error: ${String(err)}`);
+              // Use fallback on error
+              const fallbackNode = await this.useFallbackCallHierarchy(editor, symbol);
+              if (fallbackNode) {
+                callHierarchyNode = fallbackNode;
+              }
+            }
+          } else {
+            this.logger.appendLine(`[CALL_HIERARCHY] No call hierarchy items found`);
+            // Try fallback approach for no items case
+            const fallbackNode = await this.useFallbackCallHierarchy(editor, symbol);
+            if (fallbackNode) {
+              callHierarchyNode = fallbackNode;
+            }
           }
+        } catch (err) {
+          this.logger.appendLine(`[CALL_HIERARCHY] Error: ${String(err)}`);
+          console.log(`${timestamp()} [error] [CALL_HIERARCHY] Error: ${String(err)}`);
         }
       } catch (err) {
         this.logger.appendLine(`[ERROR] Failed to get symbol references or call hierarchy: ${String(err)}`);
       }
-    }
+    
 
-    // Incremental aggregation while streaming
-    const byFile = new Map<string, ReferenceLineNode[]>();
-    const seen = new Set<string>(); // fsPath:line:start
-    const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath;
-    const activeDir = activeFsPath ? path.dirname(activeFsPath) : undefined;
-    const uiThrottleMs = 150; // simple throttle to avoid excessive refreshes
-    let lastUi = 0;
-    let streamingComplete = false;
+    // Prepare for UI updates
 
     const rebuildAndRefresh = () => {
       const groups: FileGroupNode[] = [];
@@ -327,30 +401,32 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       });
       
       // Prepare the roots array with symbol references and call hierarchy at the top
-      const roots: TreeNode[] = [];
+      const rootNodes: TreeNode[] = [];
       
       // Add symbol references if available
       if (symbolReferencesNode && symbolReferencesNode.children.length > 0) {
-        roots.push(symbolReferencesNode);
+        rootNodes.push(symbolReferencesNode);
       }
       
       // Add call hierarchy if available
       if (callHierarchyNode && callHierarchyNode.callItems.length > 0) {
-        roots.push(callHierarchyNode);
+        rootNodes.push(callHierarchyNode);
       }
       
       // Add file groups
-      roots.push(...groups);
+      rootNodes.push(...groups);
       
       // Keep spinner visible while streaming, but do not disrupt first group position
       if (!streamingComplete) {
-        this.roots = roots.length ? [...roots, new BusyNode(`Searching "${symbol}"...`)] : [new BusyNode(`Searching "${symbol}"...`)];
+        this.roots = rootNodes.length ? [...rootNodes, new BusyNode(`Searching "${symbol}"...`)] : [new BusyNode(`Searching "${symbol}"...`)];
       } else {
-        this.roots = roots;
+        this.roots = rootNodes;
       }
       this._onDidChangeTreeData.fire(undefined);
     };
 
+    // Begin streaming search
+    
     // Perform streaming search, update the tree as batches arrive, but await completion
     const lines = await findReferencesByTextStream(symbol, this.logger, (batch: ReferenceLineNode[]) => {
       for (const node of batch) {
@@ -485,6 +561,105 @@ class ReferencesProvider implements vscode.TreeDataProvider<TreeNode> {
       label: String(ch.label ?? ''),
       inlineSymbols: ch.symbolChildren.map(s => s.symbol)
     }));
+  }
+
+  /**
+   * Fallback implementation for call hierarchy when the LSP command is not available
+   * or doesn't return results. Currently supports Python functions.
+   */
+  async useFallbackCallHierarchy(
+    editor: vscode.TextEditor,
+    symbol: string,
+    document = editor.document,
+    position = editor.selection.active
+  ): Promise<CallHierarchyNode | undefined> {
+    // Log entry to fallback method
+    this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] Entered fallback method for symbol: ${symbol}`);
+    console.log(`${timestamp()} [info] [CALL_HIERARCHY_FALLBACK] Entered fallback method for symbol: ${symbol}`);
+    
+    // Fallback approach for languages that don't support call hierarchy API
+    // For Python/Java functions, we can try to find calls to this function in the text search results
+    const fileExt = path.extname(editor.document.fileName).toLowerCase();
+    const isPythonFile = fileExt === '.py';
+    const isJavaFile = fileExt === '.java';
+    const isFunctionOrMethod = symbol.match(/^[a-zA-Z0-9_]+$/) !== null; // Simple check for function-like names
+    
+    this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] File type check: fileExt=${fileExt}, isPythonFile=${isPythonFile}, isJavaFile=${isJavaFile}, isFunctionOrMethod=${isFunctionOrMethod}`);
+    console.log(`${timestamp()} [info] [CALL_HIERARCHY_FALLBACK] File type check: fileExt=${fileExt}, isPythonFile=${isPythonFile}, isJavaFile=${isJavaFile}, isFunctionOrMethod=${isFunctionOrMethod}`);
+    
+    if ((isPythonFile || isJavaFile) && isFunctionOrMethod) {
+      this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] Using fallback for ${isPythonFile ? 'Python' : 'Java'} function: ${symbol}`);
+      console.log(`${timestamp()} [info] [CALL_HIERARCHY_FALLBACK] Using fallback for ${isPythonFile ? 'Python' : 'Java'} function: ${symbol}`);
+      
+      // Create a mock call hierarchy using text search results
+      // We'll look for patterns like: symbol( or symbol(
+      const mockCalls: vscode.CallHierarchyIncomingCall[] = [];
+      
+      // Search for function calls in the workspace
+      const callPattern = `${symbol}\(`; // Look for function_name(
+      
+      // Determine which file types to search based on current file
+      let filePattern = '';
+      if (isPythonFile) {
+        filePattern = '**/*.py';
+        this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] Searching Python files for: ${callPattern}`);
+      } else if (isJavaFile) {
+        filePattern = '**/*.java';
+        this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] Searching Java files for: ${callPattern}`);
+      }
+      
+      this.logger.appendLine(`[CALL_HIERARCHY_FALLBACK] Using file pattern: ${filePattern}`);
+      console.log(`${timestamp()} [info] [CALL_HIERARCHY_FALLBACK] Using file pattern: ${filePattern}`);
+      
+      const files = await vscode.workspace.findFiles(filePattern, '**/node_modules/**');
+      
+      for (const file of files) {
+        if (file.fsPath === editor.document.uri.fsPath) continue; // Skip the current file
+        
+        try {
+          const doc = await vscode.workspace.openTextDocument(file);
+          const text = doc.getText();
+          
+          // Find all occurrences of the function call
+          const regex = new RegExp(callPattern, 'g');
+          let match;
+          
+          while ((match = regex.exec(text)) !== null) {
+            const pos = doc.positionAt(match.index);
+            const line = doc.lineAt(pos.line);
+            
+            // Create a mock call hierarchy item
+            const mockItem: vscode.CallHierarchyItem = {
+              name: `Call from ${path.basename(file.fsPath)}`,
+              kind: vscode.SymbolKind.Function,
+              uri: file,
+              range: new vscode.Range(pos, pos.translate(0, symbol.length + 1)),
+              selectionRange: new vscode.Range(pos, pos.translate(0, symbol.length))
+            };
+            
+            // Create a mock incoming call
+            const mockCall: vscode.CallHierarchyIncomingCall = {
+              from: mockItem,
+              fromRanges: [new vscode.Range(pos, pos.translate(0, symbol.length + 1))]
+            };
+            
+            mockCalls.push(mockCall);
+          }
+        } catch (err) {
+          this.logger?.appendLine(`[CALL_HIERARCHY] Error processing file ${file.fsPath}: ${String(err)}`);
+        }
+      }
+      
+      if (mockCalls.length > 0) {
+        const newCallHierarchyNode = new CallHierarchyNode(symbol, mockCalls);
+        this.logger?.appendLine(`[CALL_HIERARCHY] Created fallback CallHierarchyNode with ${mockCalls.length} calls`);
+        return newCallHierarchyNode;
+      } else {
+        this.logger?.appendLine(`[CALL_HIERARCHY] No calls found with fallback approach`);
+      }
+    }
+    
+    return undefined;
   }
 }
 

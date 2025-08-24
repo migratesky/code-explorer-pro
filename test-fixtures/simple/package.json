@@ -1,0 +1,7 @@
+{
+  "name": "code-explorer-pro-test-fixture",
+  "version": "1.0.0",
+  "description": "Test fixture for Code Explorer Pro",
+  "main": "src/a.js",
+  "private": true
+}
